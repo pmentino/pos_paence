@@ -9,13 +9,14 @@ use App\Models\PosCart;
 use App\Models\Product;
 use Illuminate\Http\Request;
 use Yajra\DataTables\DataTables;
+use Illuminate\Support\Facades\Http; // <--- Add this line
+use Carbon\Carbon; // <--- Add this line
 
 class OrderController extends Controller
 {
     /**
      * Display a listing of the resource.
      */
-
     public function index(Request $request)
     {
         if ($request->ajax()) {
@@ -115,9 +116,9 @@ class OrderController extends Controller
         $order->sub_total = $totalAmountOrder;
         $order->discount = $orderDiscount;
         $order->paid = $request->paid;
-        $order->total = round((float)$total, 2);
-        $order->due = round((float)$due, 2);
-        $order->status = round((float)$due, 2) <= 0;
+        $order->total = round((float) $total, 2);
+        $order->due = round((float) $due, 2);
+        $order->status = round((float) $due, 2) <= 0;
         $order->save();
         //create order transaction
         if ($request->paid > 0) {
@@ -128,6 +129,12 @@ class OrderController extends Controller
                 'paid_by' => 'cash',
             ]);
         }
+
+        // --- Start: Send to Make.com Integration ---
+        // Ensure the order and its relationships are loaded before sending
+        $order->load('customer', 'products.product', 'products.product.unit');
+        $this->sendInvoiceToMake($order);
+        // --- End: Send to Make.com Integration ---
 
         $carts = PosCart::where('user_id', auth()->id())->delete();
         return response()->json(['message' => 'Order completed successfully', 'order' => $order], 200);
@@ -154,7 +161,8 @@ class OrderController extends Controller
      */
     public function update(Request $request, string $id)
     {
-        //
+        // This method doesn't currently finalize an order or payment.
+        // If it ever does, you might consider calling $this->sendInvoiceToMake($order) here too.
     }
 
     /**
@@ -164,26 +172,26 @@ class OrderController extends Controller
     {
         //
     }
+
     public function invoice($id)
     {
         $order = Order::with(['customer', 'products.product'])->findOrFail($id);
         return view('backend.orders.print-invoice', compact('order'));
     }
+
     public function collection(Request $request, $id)
     {
-
         $order = Order::findOrFail($id);
         if ($request->isMethod('post')) {
             $data = $request->validate([
                 'amount' => 'required|numeric|min:1',
             ]);
 
-
             $due = $order->due - $data['amount'];
             $paid = $order->paid + $data['amount'];
-            $order->due = round((float)$due, 2);
-            $order->paid = round((float)$paid, 2);
-            $order->status = round((float)$due, 2) <= 0;
+            $order->due = round((float) $due, 2);
+            $order->paid = round((float) $paid, 2);
+            $order->status = round((float) $due, 2) <= 0;
             $order->save();
             $collection_amount = $data['amount'];
             //create order transaction
@@ -194,6 +202,13 @@ class OrderController extends Controller
                 'user_id' => auth()->id(),
                 'paid_by' => 'cash',
             ]);
+
+            // --- Optional: Send email for Due Collection Invoice ---
+            // If you want to send a separate email for due collections,
+            // you could create a similar sendCollectionInvoiceToMake method here.
+            // For now, we're focusing on the initial order invoice.
+            // --- End Optional ---
+
             return to_route('backend.admin.collectionInvoice', $orderTransaction->id);
         }
         return view('backend.orders.collection.create', compact('order'));
@@ -207,6 +222,7 @@ class OrderController extends Controller
         $order = $transaction->order;
         return view('backend.orders.collection.invoice', compact('order', 'collection_amount', 'transaction'));
     }
+
     //transactions by order id
     public function transactions($id)
     {
@@ -217,7 +233,74 @@ class OrderController extends Controller
     public function posInvoice($id)
     {
         $order = Order::with(['customer', 'products.product'])->findOrFail($id);
-        $maxWidth = readConfig('receiptMaxwidth')??'300px';
+        $maxWidth = readConfig('receiptMaxwidth') ?? '300px';
         return view('backend.orders.pos-invoice', compact('order', 'maxWidth'));
+    }
+
+    /**
+     * Sends invoice data to Make.com webhook.
+     * This is a private helper method.
+     */
+    private function sendInvoiceToMake(Order $order) {
+        // Ensure you have your Make.com Webhook URL in your .env file
+        $makeWebhookUrl = env('MAKE_WEBHOOK_URL');
+
+        if (!$makeWebhookUrl) {
+            \Log::error('MAKE_WEBHOOK_URL is not set in .env file. Invoice email not sent to Make.com.');
+            return; // Exit if the URL isn't configured
+        }
+
+        // Prepare the data to send to Make.com as a JSON payload
+        $invoiceData = [
+            'order_id' => $order->id,
+            'sale_date' => Carbon::parse($order->created_at)->format('d/m/Y'), // Uses original order date
+            'current_date' => date('d/m/Y'), // Current date when sending
+            'user_name' => auth()->user()->name ?? 'System User', // Fallback if no authenticated user
+            'site_name' => readConfig('is_show_site_invoice') ? readConfig('site_name') : '',
+            'site_logo_url' => readConfig('is_show_logo_invoice') ? assetImage(readConfig('site_logo')) : '',
+            'contact_address' => readConfig('is_show_address_invoice') ? readConfig('contact_address') : '',
+            'contact_phone' => readConfig('is_show_phone_invoice') ? readConfig('contact_phone') : '',
+            'contact_email' => readConfig('is_show_email_invoice') ? readConfig('contact_email') : '',
+
+            'customer_name' => readConfig('is_show_customer_invoice') ? ($order->customer->name ?? 'N/A') : '',
+            'customer_address' => readConfig('is_show_customer_invoice') ? ($order->customer->address ?? 'N/A') : '',
+            'customer_phone' => readConfig('is_show_customer_invoice') ? ($order->customer->phone ?? 'N/A') : '',
+            'customer_email' => readConfig('is_show_customer_invoice') ? ($order->customer->email ?? '') : '', // Crucial for sending email!
+
+            'sub_total' => number_format($order->sub_total, 2, '.', ''),
+            'discount' => number_format($order->discount, 2, '.', ''),
+            'total' => number_format($order->total, 2, '.', ''),
+            'paid' => number_format($order->paid, 2, '.', ''),
+            'due' => number_format($order->due, 2, '.', ''),
+            'note_to_customer' => readConfig('is_show_note_invoice') ? readConfig('note_to_customer_invoice') : '',
+
+            'products' => $order->products->map(function ($item) {
+                return [
+                    'sn' => $item->id, // This is okay, or you could make it a sequential index if needed
+                    'product_name' => $item->product->name,
+                    'quantity' => $item->quantity,
+                    'unit_short_name' => optional($item->product->unit)->short_name,
+                    'original_price' => number_format($item->price, 2, '.', ''),
+                    'discounted_price' => number_format($item->discounted_price, 2, '.', ''),
+                    'total_item_price' => number_format($item->total, 2, '.', ''),
+                    'has_discount_on_item' => ($item->price > $item->discounted_price),
+                ];
+            })->toArray(),
+        ];
+
+        try {
+            $response = Http::post($makeWebhookUrl, $invoiceData);
+
+            if ($response->successful()) {
+                \Log::info('Invoice data sent to Make.com successfully for Order ID: ' . $order->id);
+            } else {
+                \Log::error('Failed to send invoice data to Make.com for Order ID: ' . $order->id, [
+                    'status' => $response->status(),
+                    'body' => $response->body(),
+                ]);
+            }
+        } catch (\Exception $e) {
+            \Log::error('Error sending invoice data to Make.com: ' . $e->getMessage(), ['order_id' => $order->id]);
+        }
     }
 }

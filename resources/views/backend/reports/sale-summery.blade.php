@@ -26,7 +26,7 @@
               <!-- /.col -->
               <div class="col-sm-4">
                 <address>
-                  <strong>Sale Summery ({{$start_date}} - {{$end_date}})</strong><br>
+                  <strong>Sale Summary ({{$start_date}} - {{$end_date}})</strong><br>
                 </address>
               </div>
               <!-- /.col -->

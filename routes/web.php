@@ -21,6 +21,7 @@ use App\Http\Controllers\Backend\RolePermission\RoleController;
 use App\Http\Controllers\Backend\Product\UnitController;
 use App\Http\Controllers\Backend\UserManagementController;
 use App\Http\Controllers\Backend\WebsiteSettingController;
+use App\Http\Controllers\ReceiptController;
 use App\Models\Supplier;
 
 /*
